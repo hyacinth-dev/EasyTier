@@ -304,11 +304,14 @@ impl PeerManager {
     }
 
     async fn add_new_peer_conn(&self, peer_conn: PeerConn) -> Result<(), Error> {
+        println!("主机网络: {:?}", self.global_ctx.get_network_identity());
+        println!("网络身份: {:?}", peer_conn.get_network_identity());
         if self.global_ctx.get_network_identity() != peer_conn.get_network_identity() {
             return Err(Error::SecretKeyError(
                 "network identity not match".to_string(),
             ));
         }
+        println!("服务器接受到连接: {:?}", peer_conn.get_conn_id());
         Ok(self.peers.add_new_peer_conn(peer_conn).await)
     }
 
@@ -412,7 +415,7 @@ impl PeerManager {
         tunnel: Box<dyn Tunnel>,
         is_directly_connected: bool,
     ) -> Result<(), Error> {
-        tracing::info!("add tunnel as server start");
+        println!("add tunnel as server start");
         let mut peer = PeerConn::new(self.my_peer_id, self.global_ctx.clone(), tunnel);
         peer.do_handshake_as_server().await?;
         if peer.get_network_identity().network_name
@@ -426,7 +429,7 @@ impl PeerManager {
         } else {
             self.foreign_network_manager.add_peer_conn(peer).await?;
         }
-        tracing::info!("add tunnel as server done");
+        println!("add tunnel as server done");
         Ok(())
     }
 

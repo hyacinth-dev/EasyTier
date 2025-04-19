@@ -2,11 +2,8 @@
 resolver = "2"
 members = [
     "easytier",
-    "easytier-gui/src-tauri",
-    "easytier-rpc-build",
-    "easytier-web",
 ]
-default-members = ["easytier", "easytier-web"]
+default-members = ["easytier"]
 
 [profile.dev]
 panic = "unwind"

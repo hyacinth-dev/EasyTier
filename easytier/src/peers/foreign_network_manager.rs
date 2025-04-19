@@ -469,7 +469,10 @@ impl ForeignNetworkManager {
 
     pub async fn add_peer_conn(&self, peer_conn: PeerConn) -> Result<(), Error> {
         tracing::info!(peer_conn = ?peer_conn.get_conn_info(), network = ?peer_conn.get_network_identity(), "add new peer conn in foreign network manager");
-
+        println!(
+            "add new peer conn in foreign network manager: {:?}",
+            peer_conn.get_conn_info()
+        );
         let relay_peer_rpc = self.global_ctx.get_flags().relay_all_peer_rpc;
         let ret = self
             .global_ctx
