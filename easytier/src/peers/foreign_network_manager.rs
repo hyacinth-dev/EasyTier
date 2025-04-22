@@ -58,12 +58,12 @@ pub trait GlobalForeignNetworkAccessor: Send + Sync + 'static {
     async fn list_global_foreign_peer(&self, network_identity: &NetworkIdentity) -> Vec<PeerId>;
 }
 
-struct ForeignNetworkEntry {
+pub struct ForeignNetworkEntry {
     my_peer_id: PeerId,
 
     global_ctx: ArcGlobalCtx,
     network: NetworkIdentity,
-    peer_map: Arc<PeerMap>,
+    pub peer_map: Arc<PeerMap>,
     relay_data: bool,
     pm_packet_sender: Mutex<Option<PacketRecvChan>>,
 
@@ -338,7 +338,7 @@ impl Drop for ForeignNetworkEntry {
     }
 }
 
-struct ForeignNetworkManagerData {
+pub struct ForeignNetworkManagerData {
     network_peer_maps: DashMap<String, Arc<ForeignNetworkEntry>>,
     peer_network_map: DashMap<PeerId, String>,
     network_peer_last_update: DashMap<String, SystemTime>,
@@ -351,7 +351,7 @@ impl ForeignNetworkManagerData {
         self.peer_network_map.get(&peer_id).map(|v| v.clone())
     }
 
-    fn get_network_entry(&self, network_name: &str) -> Option<Arc<ForeignNetworkEntry>> {
+    pub fn get_network_entry(&self, network_name: &str) -> Option<Arc<ForeignNetworkEntry>> {
         self.network_peer_maps.get(network_name).map(|v| v.clone())
     }
 
@@ -436,7 +436,7 @@ pub struct ForeignNetworkManager {
     global_ctx: ArcGlobalCtx,
     packet_sender_to_mgr: PacketRecvChan,
 
-    data: Arc<ForeignNetworkManagerData>,
+    pub data: Arc<ForeignNetworkManagerData>,
 
     tasks: Arc<std::sync::Mutex<JoinSet<()>>>,
 
@@ -490,6 +490,9 @@ impl ForeignNetworkManager {
             return ret;
         }
 
+        let mut max_client = i32::MAX;
+        let mut need_update = false;
+
         if self.pool.is_some() {
             let res = self.pool.as_ref().unwrap().acquire().await;
             if let Err(e) = res {
@@ -528,6 +531,16 @@ impl ForeignNetworkManager {
                 );
                 return Err(Error::DbError("网络密钥不匹配".to_string()));
             }
+            max_client = row.get::<i32, _>("max_client");
+            need_update = row.get::<i32, _>("need_update") == 1;
+
+            if need_update {
+                let sql = format!(
+                    "UPDATE networks SET need_update=0 WHERE name='{}'",
+                    peer_conn.get_network_identity().network_name
+                );
+                conn.execute(sql.as_str()).await.unwrap();
+            }
         }
 
         let (entry, new_added) = self
@@ -542,7 +555,21 @@ impl ForeignNetworkManager {
             )
             .await;
 
-        println!("{:?}", entry.peer_map.list_peers().await);
+        entry.peer_map.clean_peer_without_conn().await;
+
+        if need_update {
+            println!("检测到需要更新，将所有人逐出");
+            // 将所有人逐出房间
+            for peer in entry.peer_map.list_peers().await {
+                entry.peer_map.close_peer(peer).await;
+            }
+        }
+
+        println!("get peers: {:?}", entry.peer_map.list_peers().await);
+
+        if entry.peer_map.list_peers().await.len() >= max_client as usize {
+            return Err(Error::DbError("房间用户数超限".to_string()));
+        }
 
         if entry.network != peer_conn.get_network_identity() {
             if new_added {

@@ -20,7 +20,7 @@ use crate::{
 };
 use anyhow::Context;
 use chrono::{DateTime, Local};
-use sqlx::{mysql::MySqlPoolOptions, Executor, Row, MySqlPool};
+use sqlx::{mysql::MySqlPoolOptions, Executor, MySqlPool, Row};
 use tokio::{sync::broadcast, task::JoinSet};
 
 pub type MyNodeInfo = crate::proto::web::MyNodeInfo;
@@ -153,7 +153,9 @@ impl EasyTierLauncher {
                 pool.execute(
                     "CREATE TABLE IF NOT EXISTS networks (
                         name VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci UNIQUE NOT NULL,
-                        secret VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL
+                        secret VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
+                        max_client INT(11) NOT NULL DEFAULT 0,
+                        need_update TINYINT(1) NOT NULL DEFAULT 0
                     );",
                 )
                 .await?;

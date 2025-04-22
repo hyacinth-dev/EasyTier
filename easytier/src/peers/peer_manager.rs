@@ -24,6 +24,7 @@ use crate::{
         constants::EASYTIER_VERSION,
         error::Error,
         global_ctx::{ArcGlobalCtx, GlobalCtxEvent, NetworkIdentity},
+        network,
         stun::StunInfoCollectorTrait,
         PeerId,
     },
@@ -61,7 +62,7 @@ use super::{
     BoxNicPacketFilter, BoxPeerPacketFilter, PacketRecvChan, PacketRecvChanReceiver,
 };
 
-use sqlx::{mysql::MySqlPoolOptions, Executor, Row, MySqlPool};
+use sqlx::{mysql::MySqlPoolOptions, Executor, MySqlPool, Row};
 struct RpcTransport {
     my_peer_id: PeerId,
     peers: Weak<PeerMap>,
@@ -145,6 +146,8 @@ pub struct PeerManager {
 
     // conns that are directly connected (which are not hole punched)
     directly_connected_conn_map: Arc<DashMap<PeerId, DashSet<uuid::Uuid>>>,
+
+    pool: Option<Arc<MySqlPool>>,
 }
 
 impl Debug for PeerManager {
@@ -229,7 +232,7 @@ impl PeerManager {
             global_ctx.clone(),
             packet_send.clone(),
             Self::build_foreign_network_manager_accessor(&peers),
-            pool,
+            pool.clone(),
         ));
         let foreign_network_client = Arc::new(ForeignNetworkClient::new(
             global_ctx.clone(),
@@ -275,6 +278,8 @@ impl PeerManager {
             exit_nodes,
 
             directly_connected_conn_map: Arc::new(DashMap::new()),
+
+            pool,
         }
     }
 
@@ -947,10 +952,46 @@ impl PeerManager {
     async fn run_clean_peer_without_conn_routine(&self) {
         let peer_map = self.peers.clone();
         let dmap = self.directly_connected_conn_map.clone();
+        let pool = self.pool.clone();
+        let foreign_network_manager = self.foreign_network_manager.clone();
         self.tasks.lock().await.spawn(async move {
+            let db_check_update_interval = 10;
+            let mut db_timer = db_check_update_interval;
             loop {
                 peer_map.clean_peer_without_conn().await;
                 dmap.retain(|p, v| peer_map.has_peer(*p) && !v.is_empty());
+                if pool.is_some() {
+                    db_timer -= 1;
+                }
+                if db_timer == 0 {
+                    db_timer = db_check_update_interval;
+                    let res = pool.as_ref().unwrap().acquire().await;
+                    if let Err(e) = res {
+                        tracing::error!(?e, "get db connection failed");
+                        panic!();
+                    }
+                    let mut conn = res.unwrap();
+                    let sql = "SELECT * FROM networks WHERE need_update=1";
+                    let rows = conn.fetch_all(sql).await;
+                    if let Err(e) = rows {
+                        tracing::error!(?e, "get db connection failed");
+                        panic!();
+                    }
+                    let rows = rows.unwrap();
+                    for row in rows.iter() {
+                        let network_name: String = row.get::<String, _>("name");
+                        println!("发生更新的网络：{network_name}");
+                        let peer_map = &foreign_network_manager
+                            .data
+                            .get_network_entry(&network_name)
+                            .unwrap()
+                            .peer_map;
+                        for peer in peer_map.list_peers().await {
+                            println!("逐出连接：{peer}");
+                            peer_map.close_peer(peer).await.unwrap();
+                        }
+                    }
+                }
                 tokio::time::sleep(std::time::Duration::from_secs(3)).await;
             }
         });
