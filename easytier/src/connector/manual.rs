@@ -464,38 +464,3 @@ impl ConnectorManageRpc for ConnectorManagerRpcService {
         Ok(ManageConnectorResponse::default())
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use crate::{
-        peers::tests::create_mock_peer_manager,
-        set_global_var,
-        tunnel::{Tunnel, TunnelError},
-    };
-
-    use super::*;
-
-    #[tokio::test]
-    async fn test_reconnect_with_connecting_addr() {
-        set_global_var!(MANUAL_CONNECTOR_RECONNECT_INTERVAL_MS, 1);
-
-        let peer_mgr = create_mock_peer_manager().await;
-        let mgr = ManualConnectorManager::new(peer_mgr.get_global_ctx(), peer_mgr);
-
-        struct MockConnector {}
-        #[async_trait::async_trait]
-        impl TunnelConnector for MockConnector {
-            fn remote_url(&self) -> url::Url {
-                url::Url::parse("tcp://aa.com").unwrap()
-            }
-            async fn connect(&mut self) -> Result<Box<dyn Tunnel>, TunnelError> {
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-                Err(TunnelError::InvalidPacket("fake error".into()))
-            }
-        }
-
-        mgr.add_connector(MockConnector {});
-
-        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-    }
-}

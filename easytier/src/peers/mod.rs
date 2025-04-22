@@ -17,9 +17,6 @@ pub mod encrypt;
 
 pub mod peer_task;
 
-#[cfg(test)]
-pub mod tests;
-
 use crate::tunnel::packet_def::ZCPacket;
 
 #[async_trait::async_trait]

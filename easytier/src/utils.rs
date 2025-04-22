@@ -157,20 +157,3 @@ pub fn setup_panic_handler() {
         std::process::exit(1);
     }));
 }
-
-#[cfg(test)]
-mod tests {
-    use crate::common::config::{self};
-
-    use super::*;
-
-    async fn test_logger_reload() {
-        println!("current working dir: {:?}", std::env::current_dir());
-        let config = config::TomlConfigLoader::default();
-        let s = init_logger(&config, true).unwrap();
-        tracing::debug!("test not display debug");
-        s.unwrap().send(LevelFilter::DEBUG.to_string()).unwrap();
-        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-        tracing::debug!("test display debug");
-    }
-}

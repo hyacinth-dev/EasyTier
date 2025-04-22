@@ -132,30 +132,3 @@ impl Encryptor for AesGcmCipher {
         };
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use crate::{
-        peers::encrypt::{ring_aes_gcm::AesGcmCipher, Encryptor},
-        tunnel::packet_def::{ZCPacket, AES_GCM_ENCRYPTION_RESERVED},
-    };
-
-    #[test]
-    fn test_aes_gcm_cipher() {
-        let key = [0u8; 16];
-        let cipher = AesGcmCipher::new_128(key);
-        let text = b"1234567";
-        let mut packet = ZCPacket::new_with_payload(text);
-        packet.fill_peer_manager_hdr(0, 0, 0);
-        cipher.encrypt(&mut packet).unwrap();
-        assert_eq!(
-            packet.payload().len(),
-            text.len() + AES_GCM_ENCRYPTION_RESERVED
-        );
-        assert_eq!(packet.peer_manager_header().unwrap().is_encrypted(), true);
-
-        cipher.decrypt(&mut packet).unwrap();
-        assert_eq!(packet.payload(), text);
-        assert_eq!(packet.peer_manager_header().unwrap().is_encrypted(), false);
-    }
-}

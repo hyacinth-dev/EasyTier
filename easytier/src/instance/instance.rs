@@ -36,6 +36,8 @@ use crate::vpn_portal::{self, VpnPortal};
 
 use super::listeners::ListenerManager;
 
+use sqlx::{mysql::MySqlPoolOptions, Executor, Row, MySqlPool};
+
 #[cfg(feature = "socks5")]
 use crate::gateway::socks5::Socks5Server;
 
@@ -135,7 +137,10 @@ pub struct Instance {
 }
 
 impl Instance {
-    pub fn new(config: impl ConfigLoader + Send + Sync + 'static) -> Self {
+    pub fn new(
+        config: impl ConfigLoader + Send + Sync + 'static,
+        pool: Option<Arc<MySqlPool>>,
+    ) -> Self {
         let global_ctx = Arc::new(GlobalCtx::new(config));
 
         tracing::info!(
@@ -151,6 +156,7 @@ impl Instance {
             RouteAlgoType::Ospf,
             global_ctx.clone(),
             peer_packet_sender.clone(),
+            pool,
         ));
 
         let listener_manager = Arc::new(Mutex::new(ListenerManager::new(

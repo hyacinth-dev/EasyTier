@@ -48,6 +48,12 @@ pub enum Error {
 
     #[error("secret key error: {0}")]
     SecretKeyError(String),
+
+    #[error("directly connected peer is not allowed")]
+    DirectConnError,
+
+    #[error("{0}")]
+    DbError(String),
 }
 
 pub type Result<T> = result::Result<T, Error>;

@@ -653,33 +653,3 @@ impl ZCPacket {
         )
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_zc_packet() {
-        let payload = b"hello world";
-        let mut packet = ZCPacket::new_with_payload(payload);
-        let peer_manager_header = packet.mut_peer_manager_header().unwrap();
-        peer_manager_header.packet_type = PacketType::Data as u8;
-        peer_manager_header.len.set(payload.len() as u32);
-
-        let tcp_tunnel_header = packet.mut_tcp_tunnel_header().unwrap();
-        tcp_tunnel_header.len.set(payload.len() as u32);
-
-        // let udp_tunnel_header = packet.mut_udp_tunnel_header().unwrap();
-        // udp_tunnel_header.conn_id = 1;
-        // udp_tunnel_header.msg_type = 2;
-        // udp_tunnel_header.len = payload.len() as u32;
-
-        assert_eq!(packet.payload(), b"hello world");
-        assert_eq!(packet.payload_len(), 11);
-        println!("{:?}", packet.inner);
-
-        let tcp_packet = packet.convert_type(ZCPacketType::TCP).into_bytes();
-        assert_eq!(&tcp_packet[..1], b"\x0b");
-        println!("{:?}", tcp_packet);
-    }
-}

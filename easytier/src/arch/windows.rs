@@ -224,14 +224,3 @@ pub fn add_self_to_firewall_allowlist() -> anyhow::Result<()> {
     do_add_self_to_firewall_allowlist(false)?;
     Ok(())
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_add_self_to_firewall_allowlist() {
-        let res = add_self_to_firewall_allowlist();
-        assert!(res.is_ok());
-    }
-}

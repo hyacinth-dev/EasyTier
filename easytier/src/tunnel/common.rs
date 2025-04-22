@@ -144,7 +144,6 @@ where
                 tracing::warn!("poll_next on a failed FramedReader, {:?}", e);
                 return Poll::Ready(None);
             }
-
             while let Some(packet) =
                 Self::extract_one_packet(self_mut.buf, *self_mut.max_packet_size)
             {

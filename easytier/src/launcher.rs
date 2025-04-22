@@ -20,6 +20,7 @@ use crate::{
 };
 use anyhow::Context;
 use chrono::{DateTime, Local};
+use sqlx::{mysql::MySqlPoolOptions, Executor, Row, MySqlPool};
 use tokio::{sync::broadcast, task::JoinSet};
 
 pub type MyNodeInfo = crate::proto::web::MyNodeInfo;
@@ -135,7 +136,33 @@ impl EasyTierLauncher {
         data: Arc<EasyTierData>,
         fetch_node_info: bool,
     ) -> Result<(), anyhow::Error> {
-        let mut instance = Instance::new(cfg);
+        let db_url = cfg.get_db_url().clone();
+        let pool = match db_url {
+            Some(url) => {
+                let pool = MySqlPoolOptions::new()
+                    .connect(url.as_str())
+                    .await
+                    .with_context(|| format!("failed to connect to db: {}", url))?;
+                // pool.execute(
+                //     "CREATE TABLE IF NOT EXISTS networks (
+                //         name VARCHAR(255) UNIQUE NOT NULL,
+                //         secret VARCHAR(255) NOT NULL
+                //     )",
+                // )
+                // .await?;
+                pool.execute(
+                    "CREATE TABLE IF NOT EXISTS networks (
+                        name VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci UNIQUE NOT NULL,
+                        secret VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL
+                    );",
+                )
+                .await?;
+                Some(Arc::new(pool))
+            }
+            None => None,
+        };
+
+        let mut instance = Instance::new(cfg, pool);
         let peer_mgr = instance.get_peer_manager();
 
         let mut tasks = JoinSet::new();
@@ -143,6 +170,7 @@ impl EasyTierLauncher {
         // Subscribe to global context events
         let global_ctx = instance.get_global_ctx();
         let data_c = data.clone();
+
         tasks.spawn(async move {
             let mut receiver = global_ctx.subscribe();
             loop {

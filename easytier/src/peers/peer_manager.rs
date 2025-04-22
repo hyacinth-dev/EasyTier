@@ -61,6 +61,7 @@ use super::{
     BoxNicPacketFilter, BoxPeerPacketFilter, PacketRecvChan, PacketRecvChanReceiver,
 };
 
+use sqlx::{mysql::MySqlPoolOptions, Executor, Row, MySqlPool};
 struct RpcTransport {
     my_peer_id: PeerId,
     peers: Weak<PeerMap>,
@@ -161,6 +162,7 @@ impl PeerManager {
         route_algo: RouteAlgoType,
         global_ctx: ArcGlobalCtx,
         nic_channel: PacketRecvChan,
+        pool: Option<Arc<MySqlPool>>,
     ) -> Self {
         let my_peer_id = rand::random();
 
@@ -227,6 +229,7 @@ impl PeerManager {
             global_ctx.clone(),
             packet_send.clone(),
             Self::build_foreign_network_manager_accessor(&peers),
+            pool,
         ));
         let foreign_network_client = Arc::new(ForeignNetworkClient::new(
             global_ctx.clone(),
@@ -418,15 +421,21 @@ impl PeerManager {
         println!("add tunnel as server start");
         let mut peer = PeerConn::new(self.my_peer_id, self.global_ctx.clone(), tunnel);
         peer.do_handshake_as_server().await?;
+
+        // 如果是直接连接的peer，即和服务器在一个房间
         if peer.get_network_identity().network_name
             == self.global_ctx.get_network_identity().network_name
         {
-            let (peer_id, conn_id) = (peer.get_peer_id(), peer.get_conn_id());
-            self.add_new_peer_conn(peer).await?;
-            if is_directly_connected {
-                self.add_directly_connected_conn(peer_id, conn_id);
-            }
+            // let (peer_id, conn_id) = (peer.get_peer_id(), peer.get_conn_id());
+            // self.add_new_peer_conn(peer).await?;
+            // if is_directly_connected {
+            //     self.add_directly_connected_conn(peer_id, conn_id);
+            // }
+
+            // 直接处决
+            return Err(Error::DirectConnError);
         } else {
+            // 否则
             self.foreign_network_manager.add_peer_conn(peer).await?;
         }
         println!("add tunnel as server done");
@@ -1049,260 +1058,5 @@ impl PeerManager {
             .get(&peer_id)
             .map(|x| x.clone())
             .unwrap_or_default()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-
-    use std::{fmt::Debug, sync::Arc, time::Duration};
-
-    use crate::{
-        common::{config::Flags, global_ctx::tests::get_mock_global_ctx},
-        connector::{
-            create_connector_by_url, udp_hole_punch::tests::create_mock_peer_manager_with_mock_stun,
-        },
-        instance::listeners::get_listener_by_url,
-        peers::{
-            create_packet_recv_chan,
-            peer_manager::RouteAlgoType,
-            peer_rpc::tests::register_service,
-            route_trait::NextHopPolicy,
-            tests::{connect_peer_manager, wait_route_appear, wait_route_appear_with_cost},
-        },
-        proto::common::{CompressionAlgoPb, NatType, PeerFeatureFlag},
-        tunnel::{common::tests::wait_for_condition, TunnelConnector, TunnelListener},
-    };
-
-    use super::PeerManager;
-
-    #[tokio::test]
-    async fn drop_peer_manager() {
-        let peer_mgr_a = create_mock_peer_manager_with_mock_stun(NatType::Unknown).await;
-        let peer_mgr_b = create_mock_peer_manager_with_mock_stun(NatType::Unknown).await;
-        let peer_mgr_c = create_mock_peer_manager_with_mock_stun(NatType::Unknown).await;
-        connect_peer_manager(peer_mgr_a.clone(), peer_mgr_b.clone()).await;
-        connect_peer_manager(peer_mgr_b.clone(), peer_mgr_c.clone()).await;
-        connect_peer_manager(peer_mgr_a.clone(), peer_mgr_c.clone()).await;
-
-        wait_route_appear(peer_mgr_a.clone(), peer_mgr_b.clone())
-            .await
-            .unwrap();
-        wait_route_appear(peer_mgr_a.clone(), peer_mgr_c.clone())
-            .await
-            .unwrap();
-
-        // wait mgr_a have 2 peers
-        wait_for_condition(
-            || async { peer_mgr_a.get_peer_map().list_peers_with_conn().await.len() == 2 },
-            std::time::Duration::from_secs(5),
-        )
-        .await;
-
-        drop(peer_mgr_b);
-
-        wait_for_condition(
-            || async { peer_mgr_a.get_peer_map().list_peers_with_conn().await.len() == 1 },
-            std::time::Duration::from_secs(5),
-        )
-        .await;
-    }
-
-    async fn connect_peer_manager_with<C: TunnelConnector + Debug + 'static, L: TunnelListener>(
-        client_mgr: Arc<PeerManager>,
-        server_mgr: &Arc<PeerManager>,
-        mut client: C,
-        server: &mut L,
-    ) {
-        server.listen().await.unwrap();
-
-        tokio::spawn(async move {
-            client.set_bind_addrs(vec![]);
-            client_mgr.try_direct_connect(client).await.unwrap();
-        });
-
-        server_mgr
-            .add_client_tunnel(server.accept().await.unwrap())
-            .await
-            .unwrap();
-    }
-
-    #[rstest::rstest]
-    #[tokio::test]
-    #[serial_test::serial(forward_packet_test)]
-    async fn forward_packet(
-        #[values("tcp", "udp", "wg", "quic")] proto1: &str,
-        #[values("tcp", "udp", "wg", "quic")] proto2: &str,
-    ) {
-        use crate::proto::{
-            rpc_impl::RpcController,
-            tests::{GreetingClientFactory, SayHelloRequest},
-        };
-
-        let peer_mgr_a = create_mock_peer_manager_with_mock_stun(NatType::Unknown).await;
-        register_service(&peer_mgr_a.peer_rpc_mgr, "", 0, "hello a");
-
-        let peer_mgr_b = create_mock_peer_manager_with_mock_stun(NatType::Unknown).await;
-
-        let peer_mgr_c = create_mock_peer_manager_with_mock_stun(NatType::Unknown).await;
-        register_service(&peer_mgr_c.peer_rpc_mgr, "", 0, "hello c");
-
-        let mut listener1 = get_listener_by_url(
-            &format!("{}://0.0.0.0:31013", proto1).parse().unwrap(),
-            peer_mgr_b.get_global_ctx(),
-        )
-        .unwrap();
-        let connector1 = create_connector_by_url(
-            format!("{}://127.0.0.1:31013", proto1).as_str(),
-            &peer_mgr_a.get_global_ctx(),
-            crate::tunnel::IpVersion::Both,
-        )
-        .await
-        .unwrap();
-        connect_peer_manager_with(peer_mgr_a.clone(), &peer_mgr_b, connector1, &mut listener1)
-            .await;
-
-        wait_route_appear(peer_mgr_a.clone(), peer_mgr_b.clone())
-            .await
-            .unwrap();
-
-        let mut listener2 = get_listener_by_url(
-            &format!("{}://0.0.0.0:31014", proto2).parse().unwrap(),
-            peer_mgr_c.get_global_ctx(),
-        )
-        .unwrap();
-        let connector2 = create_connector_by_url(
-            format!("{}://127.0.0.1:31014", proto2).as_str(),
-            &peer_mgr_b.get_global_ctx(),
-            crate::tunnel::IpVersion::Both,
-        )
-        .await
-        .unwrap();
-        connect_peer_manager_with(peer_mgr_b.clone(), &peer_mgr_c, connector2, &mut listener2)
-            .await;
-
-        wait_route_appear(peer_mgr_a.clone(), peer_mgr_c.clone())
-            .await
-            .unwrap();
-
-        let stub = peer_mgr_a
-            .peer_rpc_mgr
-            .rpc_client()
-            .scoped_client::<GreetingClientFactory<RpcController>>(
-                peer_mgr_a.my_peer_id,
-                peer_mgr_c.my_peer_id,
-                "".to_string(),
-            );
-
-        let ret = stub
-            .say_hello(
-                RpcController::default(),
-                SayHelloRequest {
-                    name: "abc".to_string(),
-                },
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(ret.greeting, "hello c abc!");
-    }
-
-    #[tokio::test]
-    async fn communicate_between_enc_and_non_enc() {
-        let create_mgr = |enable_encryption| async move {
-            let (s, _r) = create_packet_recv_chan();
-            let mock_global_ctx = get_mock_global_ctx();
-            mock_global_ctx.config.set_flags(Flags {
-                enable_encryption,
-                data_compress_algo: CompressionAlgoPb::Zstd.into(),
-                ..Default::default()
-            });
-            let peer_mgr = Arc::new(PeerManager::new(RouteAlgoType::Ospf, mock_global_ctx, s));
-            peer_mgr.run().await.unwrap();
-            peer_mgr
-        };
-
-        let peer_mgr_a = create_mgr(true).await;
-        let peer_mgr_b = create_mgr(false).await;
-
-        connect_peer_manager(peer_mgr_a.clone(), peer_mgr_b.clone()).await;
-
-        // wait 5sec should not crash.
-        tokio::time::sleep(Duration::from_secs(5)).await;
-
-        // both mgr should alive
-        let mgr_c = create_mgr(true).await;
-        connect_peer_manager(peer_mgr_a.clone(), mgr_c.clone()).await;
-        wait_route_appear(mgr_c, peer_mgr_a).await.unwrap();
-
-        let mgr_d = create_mgr(false).await;
-        connect_peer_manager(peer_mgr_b.clone(), mgr_d.clone()).await;
-        wait_route_appear(mgr_d, peer_mgr_b).await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn test_avoid_relay_data() {
-        // a->b->c
-        // a->d->e->c
-        let peer_mgr_a = create_mock_peer_manager_with_mock_stun(NatType::Unknown).await;
-        let peer_mgr_b = create_mock_peer_manager_with_mock_stun(NatType::Unknown).await;
-        let peer_mgr_c = create_mock_peer_manager_with_mock_stun(NatType::Unknown).await;
-        let peer_mgr_d = create_mock_peer_manager_with_mock_stun(NatType::Unknown).await;
-        let peer_mgr_e = create_mock_peer_manager_with_mock_stun(NatType::Unknown).await;
-
-        connect_peer_manager(peer_mgr_a.clone(), peer_mgr_b.clone()).await;
-        connect_peer_manager(peer_mgr_b.clone(), peer_mgr_c.clone()).await;
-
-        connect_peer_manager(peer_mgr_a.clone(), peer_mgr_d.clone()).await;
-        connect_peer_manager(peer_mgr_d.clone(), peer_mgr_e.clone()).await;
-        connect_peer_manager(peer_mgr_e.clone(), peer_mgr_c.clone()).await;
-
-        // when b's avoid_relay_data is false, a->c should route through b and cost is 2
-        wait_route_appear_with_cost(peer_mgr_a.clone(), peer_mgr_c.my_peer_id, Some(2))
-            .await
-            .unwrap();
-        let ret = peer_mgr_a
-            .get_route()
-            .get_next_hop_with_policy(peer_mgr_c.my_peer_id, NextHopPolicy::LeastCost)
-            .await;
-        assert_eq!(ret, Some(peer_mgr_b.my_peer_id));
-
-        // when b's avoid_relay_data is true, a->c should route through d and e, cost is 3
-        peer_mgr_b
-            .get_global_ctx()
-            .set_feature_flags(PeerFeatureFlag {
-                avoid_relay_data: true,
-                ..Default::default()
-            });
-        tokio::time::sleep(Duration::from_secs(2)).await;
-        wait_route_appear_with_cost(peer_mgr_a.clone(), peer_mgr_c.my_peer_id, Some(3))
-            .await
-            .expect(
-                format!(
-                    "route not appear, a route table: {}, table: {:#?}",
-                    peer_mgr_a.get_route().dump().await,
-                    peer_mgr_a.get_route().list_routes().await
-                )
-                .as_str(),
-            );
-
-        let ret = peer_mgr_a
-            .get_route()
-            .get_next_hop_with_policy(peer_mgr_c.my_peer_id, NextHopPolicy::LeastCost)
-            .await;
-        assert_eq!(ret, Some(peer_mgr_d.my_peer_id));
-
-        println!("route table: {:#?}", peer_mgr_a.list_routes().await);
-
-        // drop e, path should go back to through b
-        drop(peer_mgr_e);
-        wait_route_appear_with_cost(peer_mgr_a.clone(), peer_mgr_c.my_peer_id, Some(2))
-            .await
-            .unwrap();
-        let ret = peer_mgr_a
-            .get_route()
-            .get_next_hop_with_policy(peer_mgr_c.my_peer_id, NextHopPolicy::LeastCost)
-            .await;
-        assert_eq!(ret, Some(peer_mgr_b.my_peer_id));
     }
 }

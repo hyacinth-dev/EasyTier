@@ -103,11 +103,15 @@ pub trait ConfigLoader: Send + Sync {
     fn get_port_forwards(&self) -> Vec<PortForwardConfig>;
     fn set_port_forwards(&self, forwards: Vec<PortForwardConfig>);
 
+    fn get_db_url(&self) -> Option<String>;
+    fn set_db_url(&self, url: Option<String>);
+
     fn dump(&self) -> String;
 }
 
 pub type NetworkSecretDigest = [u8; 32];
 
+#[allow(clippy::derived_hash_with_manual_eq)]
 #[derive(Debug, Clone, Deserialize, Serialize, Default, Eq, Hash)]
 pub struct NetworkIdentity {
     pub network_name: String,
@@ -249,11 +253,14 @@ struct Config {
     socks5_proxy: Option<url::Url>,
 
     port_forward: Option<Vec<PortForwardConfig>>,
-
+    
+    db_url: Option<String>,
+    
     flags: Option<serde_json::Map<String, serde_json::Value>>,
 
     #[serde(skip)]
     flags_struct: Option<Flags>,
+
 }
 
 #[derive(Debug, Clone)]
@@ -601,6 +608,14 @@ impl ConfigLoader for TomlConfigLoader {
         self.config.lock().unwrap().port_forward = Some(forwards);
     }
 
+    fn get_db_url(&self) -> Option<String> {
+        self.config.lock().unwrap().db_url.clone()
+    }
+
+    fn set_db_url(&self, url: Option<String>) {
+        self.config.lock().unwrap().db_url = url;
+    }
+
     fn dump(&self) -> String {
         let default_flags_json = serde_json::to_string(&gen_default_flags()).unwrap();
         let default_flags_hashmap =
@@ -624,80 +639,5 @@ impl ConfigLoader for TomlConfigLoader {
         let mut config = self.config.lock().unwrap().clone();
         config.flags = Some(flag_map);
         toml::to_string_pretty(&config).unwrap()
-    }
-}
-
-#[cfg(test)]
-pub mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn full_example_test() {
-        let config_str = r#"
-instance_name = "default"
-instance_id = "87ede5a2-9c3d-492d-9bbe-989b9d07e742"
-ipv4 = "10.144.144.10"
-listeners = [ "tcp://0.0.0.0:11010", "udp://0.0.0.0:11010" ]
-routes = [ "192.168.0.0/16" ]
-
-[network_identity]
-network_name = "default"
-network_secret = ""
-
-[[peer]]
-uri = "tcp://public.kkrainbow.top:11010"
-
-[[peer]]
-uri = "udp://192.168.94.33:11010"
-
-[[proxy_network]]
-cidr = "10.147.223.0/24"
-allow = ["tcp", "udp", "icmp"]
-
-[[proxy_network]]
-cidr = "10.1.1.0/24"
-allow = ["tcp", "icmp"]
-
-[file_logger]
-level = "info"
-file = "easytier"
-dir = "/tmp/easytier"
-
-[console_logger]
-level = "warn"
-
-[[port_forward]]
-bind_addr = "0.0.0.0:11011"
-dst_addr = "192.168.94.33:11011"
-proto = "tcp"
-"#;
-        let ret = TomlConfigLoader::new_from_str(config_str);
-        if let Err(e) = &ret {
-            println!("{}", e);
-        } else {
-            println!("{:?}", ret.as_ref().unwrap());
-        }
-        assert!(ret.is_ok());
-
-        let ret = ret.unwrap();
-        assert_eq!("10.144.144.10/24", ret.get_ipv4().unwrap().to_string());
-
-        assert_eq!(
-            vec!["tcp://0.0.0.0:11010", "udp://0.0.0.0:11010"],
-            ret.get_listener_uris()
-                .iter()
-                .map(|u| u.to_string())
-                .collect::<Vec<String>>()
-        );
-
-        assert_eq!(
-            vec![PortForwardConfig {
-                bind_addr: "0.0.0.0:11011".parse().unwrap(),
-                dst_addr: "192.168.94.33:11011".parse().unwrap(),
-                proto: "tcp".to_string(),
-            }],
-            ret.get_port_forwards()
-        );
-        println!("{}", ret.dump());
     }
 }

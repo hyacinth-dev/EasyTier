@@ -445,6 +445,14 @@ struct Cli {
         num_args = 1..
     )]
     port_forward: Vec<url::Url>,
+
+    #[arg(
+        long,
+        env="ET_DB_URL",
+        help = t!("core_clap.db_url").to_string(),
+        num_args=1
+    )]
+    db_url: Option<String>,
 }
 
 rust_i18n::i18n!("locales", fallback = "en");
@@ -715,6 +723,8 @@ impl TryFrom<&Cli> for TomlConfigLoader {
             old.push(port_forward_item);
             cfg.set_port_forwards(old);
         }
+
+        cfg.set_db_url(cli.db_url.clone());
 
         let mut f = cfg.get_flags();
         if let Some(default_protocol) = &cli.default_protocol {
