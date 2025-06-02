@@ -17,6 +17,7 @@ use petgraph::{
     graph::NodeIndex,
     Directed, Graph,
 };
+use pnet::packet::ipv4::Ipv4;
 use prost::Message;
 use prost_reflect::{DynamicMessage, ReflectMessage};
 use serde::{Deserialize, Serialize};
@@ -1030,6 +1031,8 @@ struct PeerRouteServiceImpl {
     cached_local_conn_map: std::sync::Mutex<RouteConnBitmap>,
 
     last_update_my_foreign_network: AtomicCell<Option<std::time::Instant>>,
+
+    ip_range: String,
 }
 
 impl Debug for PeerRouteServiceImpl {
@@ -1052,7 +1055,10 @@ impl Debug for PeerRouteServiceImpl {
 }
 
 impl PeerRouteServiceImpl {
-    fn new(my_peer_id: PeerId, global_ctx: ArcGlobalCtx) -> Self {
+    fn new(my_peer_id: PeerId, global_ctx: ArcGlobalCtx, mut ip_range: String) -> Self {
+        if let Some(index) = ip_range.find("/") {
+            ip_range = ip_range[..index].to_string();
+        }
         PeerRouteServiceImpl {
             my_peer_id,
             my_peer_route_id: rand::random(),
@@ -1076,6 +1082,8 @@ impl PeerRouteServiceImpl {
             cached_local_conn_map: std::sync::Mutex::new(RouteConnBitmap::new()),
 
             last_update_my_foreign_network: AtomicCell::new(None),
+
+            ip_range,
         }
     }
 
@@ -1280,7 +1288,22 @@ impl PeerRouteServiceImpl {
                 continue;
             }
 
-            route_infos.push(item.value().clone());
+            // println!("push: {:?}", item.value());
+
+            let mut val = item.value().clone();
+            if val.peer_id == self.my_peer_id && !self.ip_range.is_empty() {
+                // extract ip_range into ipv4_addr.
+
+                if let Ok(ip) = self.ip_range.parse::<Ipv4Addr>() {
+                    val.ipv4_addr = Some(ip.into());
+                } else {
+                    println!("invalid ip range: {}", self.ip_range);
+                }
+
+                // val.ipv4_addr = Some(Ipv4Addr::new(192, 168, 0, 0).into());
+            }
+
+            route_infos.push(val);
         }
 
         if route_infos.is_empty() {
@@ -1460,8 +1483,8 @@ impl PeerRouteServiceImpl {
             return true;
         }
 
-        tracing::debug!(?foreign_network, "sync_route request need send to peer. my_id {:?}, pper_id: {:?}, peer_infos: {:?}, conn_bitmap: {:?}, synced_route_info: {:?} session: {:?}",
-                       my_peer_id, dst_peer_id, peer_infos, conn_bitmap, self.synced_route_info, session);
+        // println!("sync_route request need send to peer. my_id {:?}, pper_id: {:?}, peer_infos: {:?}, conn_bitmap: {:?}, synced_route_info: {:?} session: {:?}",
+        //                my_peer_id, dst_peer_id, peer_infos, conn_bitmap, self.synced_route_info, session);
 
         session
             .need_sync_initiator_info
@@ -1941,6 +1964,7 @@ pub struct PeerRoute {
     session_mgr: RouteSessionManager,
 
     tasks: std::sync::Mutex<JoinSet<()>>,
+    // ip_range: String,
 }
 
 impl Debug for PeerRoute {
@@ -1958,8 +1982,13 @@ impl PeerRoute {
         my_peer_id: PeerId,
         global_ctx: ArcGlobalCtx,
         peer_rpc: Arc<PeerRpcManager>,
+        ip_range: String,
     ) -> Arc<Self> {
-        let service_impl = Arc::new(PeerRouteServiceImpl::new(my_peer_id, global_ctx.clone()));
+        let service_impl = Arc::new(PeerRouteServiceImpl::new(
+            my_peer_id,
+            global_ctx.clone(),
+            ip_range,
+        ));
         let session_mgr = RouteSessionManager::new(service_impl.clone(), peer_rpc.clone());
 
         Arc::new(PeerRoute {
@@ -1971,6 +2000,7 @@ impl PeerRoute {
             session_mgr,
 
             tasks: std::sync::Mutex::new(JoinSet::new()),
+            // ip_range,
         })
     }
 
@@ -2128,6 +2158,7 @@ impl Route for PeerRoute {
 
             route.feature_flag = item.feature_flag.clone();
 
+            // println!("route pushed: {:?}", route);
             routes.push(route);
         }
         routes

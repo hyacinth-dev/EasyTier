@@ -6,6 +6,7 @@ in future, with the help wo peer center we can forward packets of peers that
 connected to any node in the local network.
 */
 use std::{
+    ops::AddAssign,
     sync::{Arc, Weak},
     time::SystemTime,
 };
@@ -73,6 +74,9 @@ pub struct ForeignNetworkEntry {
     packet_recv: Mutex<Option<PacketRecvChanReceiver>>,
 
     tasks: Mutex<JoinSet<()>>,
+
+    ip_range: String,
+    pub traffic: Arc<Mutex<u64>>,
 }
 
 impl ForeignNetworkEntry {
@@ -82,6 +86,7 @@ impl ForeignNetworkEntry {
         my_peer_id: PeerId,
         relay_data: bool,
         pm_packet_sender: PacketRecvChan,
+        ip_range: String,
     ) -> Self {
         let foreign_global_ctx = Self::build_foreign_global_ctx(&network, global_ctx.clone());
 
@@ -117,6 +122,8 @@ impl ForeignNetworkEntry {
             packet_recv: Mutex::new(Some(packet_recv)),
 
             tasks: Mutex::new(JoinSet::new()),
+            ip_range,
+            traffic: Arc::new(Mutex::new(0)),
         }
     }
 
@@ -241,7 +248,12 @@ impl ForeignNetworkEntry {
             }
         }
 
-        let route = PeerRoute::new(my_peer_id, self.global_ctx.clone(), self.peer_rpc.clone());
+        let route = PeerRoute::new(
+            my_peer_id,
+            self.global_ctx.clone(),
+            self.peer_rpc.clone(),
+            self.ip_range.clone(),
+        );
         route
             .open(Box::new(Interface {
                 my_peer_id,
@@ -263,7 +275,7 @@ impl ForeignNetworkEntry {
         let relay_data = self.relay_data;
         let pm_sender = self.pm_packet_sender.lock().await.take().unwrap();
         let network_name = self.network.network_name.clone();
-
+        let traffic = self.traffic.clone();
         self.tasks.lock().await.spawn(async move {
             while let Ok(zc_packet) = recv_packet_from_chan(&mut recv).await {
                 let Some(hdr) = zc_packet.peer_manager_header() else {
@@ -271,6 +283,11 @@ impl ForeignNetworkEntry {
                     continue;
                 };
                 tracing::info!(?hdr, "recv packet in foreign network manager");
+                // println!("packet len: {}", zc_packet.payload_len());
+                traffic
+                    .lock()
+                    .await
+                    .add_assign(zc_packet.payload_len() as u64);
                 let to_peer_id = hdr.to_peer_id.get();
                 if to_peer_id == my_node_id {
                     if hdr.packet_type == PacketType::TaRpc as u8
@@ -339,7 +356,7 @@ impl Drop for ForeignNetworkEntry {
 }
 
 pub struct ForeignNetworkManagerData {
-    network_peer_maps: DashMap<String, Arc<ForeignNetworkEntry>>,
+    pub network_peer_maps: DashMap<String, Arc<ForeignNetworkEntry>>,
     peer_network_map: DashMap<PeerId, String>,
     network_peer_last_update: DashMap<String, SystemTime>,
     accessor: Arc<Box<dyn GlobalForeignNetworkAccessor>>,
@@ -392,6 +409,7 @@ impl ForeignNetworkManagerData {
         relay_data: bool,
         global_ctx: &ArcGlobalCtx,
         pm_packet_sender: &PacketRecvChan,
+        ip_range: String,
     ) -> (Arc<ForeignNetworkEntry>, bool) {
         let mut new_added = false;
 
@@ -407,6 +425,7 @@ impl ForeignNetworkManagerData {
                     my_peer_id,
                     relay_data,
                     pm_packet_sender.clone(),
+                    ip_range.clone(),
                 ))
             })
             .clone();
@@ -477,10 +496,10 @@ impl ForeignNetworkManager {
 
     pub async fn add_peer_conn(&self, peer_conn: PeerConn) -> Result<(), Error> {
         tracing::info!(peer_conn = ?peer_conn.get_conn_info(), network = ?peer_conn.get_network_identity(), "add new peer conn in foreign network manager");
-        println!(
-            "add new peer conn in foreign network manager: {:?}",
-            peer_conn.get_network_identity()
-        );
+        // println!(
+        //     "add new peer conn in foreign network manager: {:?}",
+        //     peer_conn.get_network_identity()
+        // );
         let relay_peer_rpc = self.global_ctx.get_flags().relay_all_peer_rpc;
         let ret = self
             .global_ctx
@@ -490,8 +509,9 @@ impl ForeignNetworkManager {
             return ret;
         }
 
-        let mut max_client = i32::MAX;
+        let mut clients_limit = i32::MAX;
         let mut need_update = false;
+        let mut ip_range = "192.168.100.0".to_string();
 
         if self.pool.is_some() {
             let res = self.pool.as_ref().unwrap().acquire().await;
@@ -501,20 +521,43 @@ impl ForeignNetworkManager {
             }
             let mut conn = res.unwrap();
             let sql = format!(
-                "SELECT * FROM networks WHERE name='{}'",
+                "SELECT * FROM vnets WHERE token='{}' AND deleted_at IS NULL",
                 peer_conn.get_network_identity().network_name
             );
             let row = conn.fetch_one(sql.as_str()).await;
             if let Err(e) = row {
-                tracing::error!(?e, "get network secret failed");
+                tracing::error!(?e, "get network failed");
                 return Err(Error::DbError("找不到网络".to_string()));
             }
             let row = row.unwrap();
 
+            let enabled = row.get::<i32, _>("enabled") == 1;
+            if !enabled {
+                return Err(Error::DbError("网络已被禁用".to_string()));
+            }
+
+            let user_id = row.get::<String, _>("user_id");
+            let sql = format!(
+                "SELECT remaining_traffic FROM users WHERE user_id='{}' AND deleted_at IS NULL",
+                user_id
+            );
+
+            let traffic_row = conn.fetch_one(sql.as_str()).await;
+            if let Err(e) = traffic_row {
+                tracing::error!(?e, "get user traffic failed");
+                return Err(Error::DbError("获取用户流量失败".to_string()));
+            }
+
+            let remaining_traffic = traffic_row.unwrap().get::<i64, _>("remaining_traffic");
+
+            if remaining_traffic <= 0 {
+                return Err(Error::DbError("用户流量已用完".to_string()));
+            }
+
             let mut db_secret_digest = [0u8; 32];
             generate_digest_from_str(
                 &peer_conn.get_network_identity().network_name,
-                &row.get::<String, _>("secret"),
+                &row.get::<String, _>("password"),
                 &mut db_secret_digest,
             );
 
@@ -531,12 +574,17 @@ impl ForeignNetworkManager {
                 );
                 return Err(Error::DbError("网络密钥不匹配".to_string()));
             }
-            max_client = row.get::<i32, _>("max_client");
+            // enable_
+            clients_limit = row.get::<i32, _>("clients_limit");
             need_update = row.get::<i32, _>("need_update") == 1;
+            let enable_dhcp = row.get::<i32, _>("enable_dhcp") == 1;
+            if enable_dhcp {
+                ip_range = row.get::<String, _>("ip_range");
+            }
 
             if need_update {
                 let sql = format!(
-                    "UPDATE networks SET need_update=0 WHERE name='{}'",
+                    "UPDATE vnets SET need_update=0 WHERE token='{}' AND deleted_at IS NULL",
                     peer_conn.get_network_identity().network_name
                 );
                 conn.execute(sql.as_str()).await.unwrap();
@@ -552,6 +600,7 @@ impl ForeignNetworkManager {
                 !ret.is_err(),
                 &self.global_ctx,
                 &self.packet_sender_to_mgr,
+                ip_range,
             )
             .await;
 
@@ -560,15 +609,30 @@ impl ForeignNetworkManager {
         if need_update {
             println!("检测到需要更新，将所有人逐出");
             // 将所有人逐出房间
-            for peer in entry.peer_map.list_peers().await {
-                entry.peer_map.close_peer(peer).await;
-            }
+            entry.peer_map.clean_all_peers().await;
         }
 
-        println!("get peers: {:?}", entry.peer_map.list_peers().await);
-
-        if entry.peer_map.list_peers().await.len() >= max_client as usize {
+        if entry.peer_map.list_peers().await.len() >= clients_limit as usize {
             return Err(Error::DbError("房间用户数超限".to_string()));
+        }
+        if self.pool.is_some() {
+            let res = self.pool.as_ref().unwrap().acquire().await;
+            if let Err(e) = res {
+                tracing::error!(?e, "get db connection failed");
+                return Err(Error::DbError(e.to_string()));
+            }
+            let mut conn = res.unwrap();
+
+            let sql = format!(
+                "UPDATE vnets SET clients_online={} WHERE token='{}' AND deleted_at IS NULL",
+                entry.peer_map.list_peers().await.len() + 1,
+                peer_conn.get_network_identity().network_name
+            );
+
+            conn.execute(sql.as_str()).await.map_err(|e| {
+                tracing::error!(?e, "update vnets clients failed");
+                Error::DbError("更新网络用户数失败".to_string())
+            })?;
         }
 
         if entry.network != peer_conn.get_network_identity() {

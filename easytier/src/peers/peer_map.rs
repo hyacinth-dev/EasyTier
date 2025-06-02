@@ -289,6 +289,15 @@ impl PeerMap {
         }
     }
 
+    pub async fn clean_all_peers(&self) {
+        let peers = self.list_peers().await;
+        for peer_id in peers {
+            if let Err(e) = self.close_peer(peer_id).await {
+                tracing::error!("Failed to close peer {}: {:?}", peer_id, e);
+            }
+        }
+    }
+
     pub async fn list_routes(&self) -> DashMap<PeerId, PeerId> {
         let route_map = DashMap::new();
         for route in self.routes.read().await.iter() {

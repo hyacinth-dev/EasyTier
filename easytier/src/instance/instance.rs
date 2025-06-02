@@ -36,7 +36,7 @@ use crate::vpn_portal::{self, VpnPortal};
 
 use super::listeners::ListenerManager;
 
-use sqlx::{mysql::MySqlPoolOptions, Executor, Row, MySqlPool};
+use sqlx::{mysql::MySqlPoolOptions, Executor, MySqlPool, Row};
 
 #[cfg(feature = "socks5")]
 use crate::gateway::socks5::Socks5Server;
@@ -268,6 +268,7 @@ impl Instance {
         let _peer_packet_receiver = self.peer_packet_receiver.clone();
         tokio::spawn(async move {
             let default_ipv4_addr = Ipv4Inet::new(Ipv4Addr::new(10, 126, 126, 0), 24).unwrap();
+            println!("dhcp check start, default ipv4 addr: {}", default_ipv4_addr);
             let mut current_dhcp_ip: Option<Ipv4Inet> = None;
             let mut next_sleep_time = 0;
             loop {
@@ -275,6 +276,9 @@ impl Instance {
 
                 // do not allocate ip if no peer connected
                 let routes = peer_manager_c.list_routes().await;
+
+                println!("dhcp check routes: {:?}", routes);
+
                 if routes.is_empty() {
                     next_sleep_time = 1;
                     continue;

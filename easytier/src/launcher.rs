@@ -143,22 +143,6 @@ impl EasyTierLauncher {
                     .connect(url.as_str())
                     .await
                     .with_context(|| format!("failed to connect to db: {}", url))?;
-                // pool.execute(
-                //     "CREATE TABLE IF NOT EXISTS networks (
-                //         name VARCHAR(255) UNIQUE NOT NULL,
-                //         secret VARCHAR(255) NOT NULL
-                //     )",
-                // )
-                // .await?;
-                pool.execute(
-                    "CREATE TABLE IF NOT EXISTS networks (
-                        name VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci UNIQUE NOT NULL,
-                        secret VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
-                        max_client INT(11) NOT NULL DEFAULT 0,
-                        need_update TINYINT(1) NOT NULL DEFAULT 0
-                    );",
-                )
-                .await?;
                 Some(Arc::new(pool))
             }
             None => None,

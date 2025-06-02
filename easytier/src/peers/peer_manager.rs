@@ -5,6 +5,8 @@ use std::{
     time::SystemTime,
 };
 
+use chrono::{DateTime, Local};
+
 use anyhow::Context;
 use async_trait::async_trait;
 
@@ -223,6 +225,7 @@ impl PeerManager {
                 my_peer_id,
                 global_ctx.clone(),
                 peer_rpc_mgr.clone(),
+                "".to_string(),
             )),
             RouteAlgoType::None => RouteAlgoInst::None,
         };
@@ -423,7 +426,7 @@ impl PeerManager {
         tunnel: Box<dyn Tunnel>,
         is_directly_connected: bool,
     ) -> Result<(), Error> {
-        println!("add tunnel as server start");
+        // println!("add tunnel as server start");
         let mut peer = PeerConn::new(self.my_peer_id, self.global_ctx.clone(), tunnel);
         peer.do_handshake_as_server().await?;
 
@@ -441,10 +444,17 @@ impl PeerManager {
             return Err(Error::DirectConnError);
         } else {
             // 否则
-            self.foreign_network_manager.add_peer_conn(peer).await?;
+            let result = self.foreign_network_manager.add_peer_conn(peer).await;
+            return match result {
+                Ok(_) => Ok(()),
+                Err(e) => match e {
+                    Error::DbError(_) => Ok(()),
+                    _ => Err(e),
+                },
+            }
         }
-        println!("add tunnel as server done");
-        Ok(())
+        // println!("add tunnel as server done");
+        // Ok(())
     }
 
     async fn try_handle_foreign_network_packet(
@@ -968,29 +978,84 @@ impl PeerManager {
                     let res = pool.as_ref().unwrap().acquire().await;
                     if let Err(e) = res {
                         tracing::error!(?e, "get db connection failed");
-                        panic!();
+                        continue;
                     }
                     let mut conn = res.unwrap();
-                    let sql = "SELECT * FROM networks WHERE need_update=1";
+                    let sql = "SELECT * FROM vnets WHERE deleted_at IS NULL";
                     let rows = conn.fetch_all(sql).await;
                     if let Err(e) = rows {
                         tracing::error!(?e, "get db connection failed");
-                        panic!();
+                        continue;
                     }
                     let rows = rows.unwrap();
-                    for row in rows.iter() {
-                        let network_name: String = row.get::<String, _>("name");
-                        println!("发生更新的网络：{network_name}");
-                        let peer_map = &foreign_network_manager
+                    for vnet_row in rows.iter() {
+                        let network_name: String = vnet_row.get::<String, _>("token");
+                        let entry = &foreign_network_manager
                             .data
-                            .get_network_entry(&network_name)
-                            .unwrap()
-                            .peer_map;
-                        for peer in peer_map.list_peers().await {
-                            println!("逐出连接：{peer}");
-                            peer_map.close_peer(peer).await.unwrap();
+                            .get_network_entry(&network_name);
+                        let mut clients_online=0;
+                        if let Some(entry_item) = entry {
+                            let user_id = vnet_row.get::<String,_>("user_id");
+                            let vnet_id = vnet_row.get::<String, _>("vnet_id");
+                            let sql=format!(
+                                "SELECT remaining_traffic FROM users WHERE user_id='{}' AND deleted_at IS NULL",
+                                user_id
+                            );
+                            let user_row = conn.fetch_one(sql.as_str()).await;
+                            if let Err(e) = user_row {
+                                tracing::error!(?e, "get user remaining traffic failed");
+                                continue;
+                            }
+                            let user_row = user_row.unwrap();
+                            let mut remaining_traffic: i64 = user_row.get("remaining_traffic");
+                            let mut traffic_ = entry_item.traffic.lock().await;
+                            let traffic = *traffic_ as i64;
+                            *traffic_=0;
+                            drop(traffic_);
+                            remaining_traffic = i64::max(0, remaining_traffic - traffic);
+                            let sql = format!(
+                                "UPDATE users SET remaining_traffic={} WHERE user_id='{}' AND deleted_at IS NULL",
+                                remaining_traffic, user_id
+                            );
+                            conn.execute(sql.as_str()).await;
+
+                            let now_utc: DateTime<Local> = Local::now();
+                            let sql_timestamp = now_utc.format("%Y-%m-%d %H:%M:%S").to_string();
+
+                            let sql = format!(
+                                "INSERT INTO usages (`created_at`, `updated_at`, `user_id`, `vnet_id`, `usage`) VALUES ('{}', '{}', '{}', '{}', {})",
+                                sql_timestamp,
+                                sql_timestamp,
+                                user_id,
+                                vnet_id,
+                                traffic
+                            );
+
+                            let result = conn.execute(sql.as_str()).await;
+                            if let Err(e) = result {
+                                println!("插入流量使用记录失败: {e}");
+                            }
+
+                            if remaining_traffic == 0 || vnet_row.get::<i64, _>("need_update")==1 {
+                                entry_item.peer_map.clean_all_peers().await;
+                                println!("清理所有peer");
+                            }
+                            else{
+                                clients_online = entry_item.peer_map.list_peers().await.len() as i64;
+                            }
+                        }
+
+                        let sql = format!(
+                            "UPDATE vnets SET clients_online={} WHERE token='{}' AND deleted_at IS NULL",
+                            clients_online,
+                            network_name
+                        );
+                        if let Err(e) = conn.execute(sql.as_str()).await {
+                            tracing::error!(?e, "update vnets failed");
                         }
                     }
+                    let sql = "UPDATE vnets SET need_update=0 WHERE need_update=1 AND deleted_at IS NULL";
+                    conn.execute(sql).await;
                 }
                 tokio::time::sleep(std::time::Duration::from_secs(3)).await;
             }
