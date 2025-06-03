@@ -451,7 +451,7 @@ impl PeerManager {
                     Error::DbError(_) => Ok(()),
                     _ => Err(e),
                 },
-            }
+            };
         }
         // println!("add tunnel as server done");
         // Ok(())
@@ -1056,6 +1056,25 @@ impl PeerManager {
                     }
                     let sql = "UPDATE vnets SET need_update=0 WHERE need_update=1 AND deleted_at IS NULL";
                     conn.execute(sql).await;
+
+                    for item in foreign_network_manager.data.network_peer_maps.iter() {
+                        let network_name = item.key();
+                        // 查找网络是否在数据库存在
+                        let sql = format!(
+                            "SELECT * FROM vnets WHERE token='{}' AND deleted_at IS NULL",
+                            network_name
+                        );
+                        let rows = conn.fetch_all(sql.as_str()).await;
+                        if let Err(e) = rows {
+                            tracing::error!(?e, "get vnets failed");
+                            continue;
+                        }
+                        let rows = rows.unwrap();
+                        if rows.is_empty(){
+                            let network_entry=item.value();
+                            network_entry.peer_map.clean_all_peers().await;
+                        }
+                    }
                 }
                 tokio::time::sleep(std::time::Duration::from_secs(3)).await;
             }
